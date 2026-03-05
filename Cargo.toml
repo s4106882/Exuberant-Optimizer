@@ -12,3 +12,6 @@ windows = { version = "0.62.2", features = ["Win32_System_Threading", "Win32_Fou
 egui = "0.33.3"
 chrono = "0.4.44"
 
+[build-dependencies]
+winres = "0.1.12"
+
