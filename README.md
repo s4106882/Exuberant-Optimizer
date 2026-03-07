@@ -28,3 +28,7 @@
    ```bash
    git clone [https://github.com/s4106882/Exuberant-Optimizer.git](https://github.com/s4106882/Exuberant-Optimizer.git)
    cd Exuberant-Optimizer
+
+ 2. Run the Program:
+    ```bash
+    cargo run --release
