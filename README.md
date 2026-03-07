@@ -8,7 +8,6 @@
 
 ### RAM Cleaner & System Timer
 * **Standby List Purging:** Manually or automatically flush the Windows memory standby list.
-* **Custom Thresholds:** Trigger purges based on your own "Standby List" and "Free Memory" targets.
 * **System Timer Resolution:** Adjust the global Windows timer to reduce input latency and improve frame pacing.
 
 ### Process Optimization
