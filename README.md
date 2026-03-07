@@ -26,5 +26,5 @@
 ### Build Instructions
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/Exuberant-Optimizer.git](https://github.com/YOUR_USERNAME/Exuberant-Optimizer.git)
+   git clone [https://github.com/s4106882/Exuberant-Optimizer.git](https://github.com/s4106882/Exuberant-Optimizer.git)
    cd Exuberant-Optimizer
