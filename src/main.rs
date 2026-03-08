@@ -1,4 +1,6 @@
 use eframe::egui;
+use egui::TextureHandle;
+use windows_icons::get_icon_by_process_id;
 use sysinfo::{System, ProcessesToUpdate};
 use egui_extras::{TableBuilder, Column};
 use windows::Win32::System::Threading::{OpenProcess, SetPriorityClass, SetProcessAffinityMask,
@@ -9,6 +11,7 @@ use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, LUI
                                SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::core::w;
+use std::collections::HashMap;
 
 // The exact structure Windows uses to track page lists
 #[repr(C)]
@@ -45,11 +48,18 @@ unsafe extern "system" {
         actual_time: *mut u32,
     ) -> i32;
 
-    fn NtQuerySystemInformation(
+    fn NtQuerySystemInformation (
         system_information_class: u32,
         system_information: *mut std::ffi::c_void,
         system_information_length: u32,
         return_length: *mut u32,
+    ) -> i32;
+
+    fn NtSetInformationProcess (
+        process_handle: HANDLE,
+        process_information_class: u32,
+        process_information: *mut std::ffi::c_void,
+        process_information_length: u32,
     ) -> i32;
 }
 enum ActiveTab {
@@ -80,6 +90,7 @@ struct OptimizerApp {
     sort_column: SortColumn,
     sort_ascending: bool,
     last_refresh: std::time::Instant,
+    icon_cache: HashMap<u32, TextureHandle>,
 }
 
 // Set starting values on first open
@@ -89,6 +100,10 @@ impl Default for OptimizerApp {
         // Strictly required to clear the memory list
         if let Err(e) = enable_privilege(w!("SeProfileSingleProcessPrivilege")) {
             eprintln!("Failed to enable privilege. Are you running as Admin? Error: {}", e);
+        }
+        // Required to change process priorities
+        if let Err(e) = enable_privilege(w!("SeIncreaseBasePriorityPrivilege")) {
+            println!("Failed to enable Priority Privilege: {}", e);
         }
 
         // Create the system handle and refresh it to get the first batch of data
@@ -108,6 +123,7 @@ impl Default for OptimizerApp {
             sort_column: SortColumn::Ram,
             sort_ascending: false,
             last_refresh: std::time::Instant::now(),
+            icon_cache: HashMap::new(),
         }
     }
 }
@@ -128,7 +144,7 @@ impl OptimizerApp {
         mask
     }
 
-    fn ui_processes(&mut self, ui: &mut egui::Ui) {
+    fn ui_processes(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let using_cpu = self.system.cpus().first().map(|c| c.brand()).unwrap_or("Unknown CPU");
         let thread_count = self.system.cpus().len();
 
@@ -144,6 +160,32 @@ impl OptimizerApp {
 
         // Convert HashMap to a Vec so it can be sorted
         let mut process_list: Vec<(&sysinfo::Pid, &sysinfo::Process)> = self.system.processes().iter().collect();
+
+        // Application Icons
+        for (pid, _) in &process_list {
+            let pid_u32 = pid.as_u32();
+
+            // If not in cache, try get it
+            if !self.icon_cache.contains_key(&pid_u32) {
+                let texture = if let Ok(image_buffer) = get_icon_by_process_id(pid_u32) {
+                    // Image buffer contains dimensions and raw pixels
+                    let width = image_buffer.width() as usize;
+                    let height = image_buffer.height() as usize;
+                    let pixels = image_buffer.into_raw();
+
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [width, height],
+                        &pixels,
+                    );
+                    // Use ctx directly from the frame or pass it in
+                    ctx.load_texture(format!("icon_{}", pid_u32), image, Default::default())
+                } else {
+                    // Fallback
+                    ctx.load_texture("default_icon", egui::ColorImage::example(), Default::default())
+                };
+                self.icon_cache.insert(pid_u32, texture);
+            }
+        }
 
         // Apply search filter first
         if !self.search_query.is_empty() {
@@ -183,11 +225,12 @@ impl OptimizerApp {
         TableBuilder::new(ui)
             .striped(true) // Makes rows alternate colours
             .vscroll(true)
-            .column(Column::initial(60.0)) // PID
-            .column(Column::initial(150.0))// Name
-            .column(Column::initial(70.0)) // CPU Usage
-            .column(Column::initial(80.0)) // RAM Usage
-            .column(Column::initial(120.0)) // Disk Usage
+            .resizable(true)
+            .column(Column::initial(160.0).at_least(100.0).clip(true)) // Icon + Name
+            .column(Column::initial(60.0).at_least(40.0)) // PID
+            .column(Column::initial(70.0).at_least(50.0)) // CPU Usage
+            .column(Column::initial(80.0).at_least(60.0)) // RAM Usage
+            .column(Column::initial(120.0).at_least(80.0)) // Disk Usage
             .column(Column::remainder())// Quick Actions
             .header(20.0, |mut header| {
                 // Clickable headers to trigger sort
@@ -210,25 +253,39 @@ impl OptimizerApp {
                         }
                     }
                 };
-
+                header.col(|ui| sort_header(ui, "Process", SortColumn::Name));
                 header.col(|ui| sort_header(ui, "PID", SortColumn::Pid));
-                header.col(|ui| sort_header(ui, "Name", SortColumn::Name));
                 header.col(|ui| sort_header(ui, "CPU", SortColumn::Cpu));
                 header.col(|ui| sort_header(ui, "RAM", SortColumn::Ram));
                 header.col(|ui| sort_header(ui, "Disk (R / W)", SortColumn::Disk));
                 header.col(|ui| { ui.strong("Quick Actions"); });
             })
-            .body(|mut body| {
+        .body(|mut body| {
                 // Loop through real processes
                 for (pid, process) in process_list {
-                    let name = process.name().to_string_lossy();
-                    // Only show if it matches search
-                    body.row(20.0, |mut row| {
-                        // PID
-                        row.col(|ui| { ui.label(pid.to_string()); });
+                    let name = process.name().to_string_lossy().to_string();
+                    let pid_u32 = pid.as_u32();
 
-                        // Name
-                        row.col(|ui| { ui.label(name); });
+                    // Get preloaded texture from cache
+                    let texture = self.icon_cache.get(&pid_u32).unwrap();
+
+                    body.row(20.0, |mut row| {
+                        // Icon and name
+                        row.col(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.image((texture.id(), egui::vec2(16.0, 16.0)));
+                                ui.add(
+                                  egui::Label::new(&name)
+                                      .truncate()
+                                );
+
+                            });
+                        });
+
+                        // PID
+                        row.col(|ui| {
+                            ui.label(pid.to_string());
+                        });
 
                         // CPU Usage
                         // process.cpu_usage() returns an f32 representing percentage
@@ -251,16 +308,17 @@ impl OptimizerApp {
                         row.col(|ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-
-                                if ui.button("SPH").on_hover_text("Set Priority to High").clicked() {
+                                if ui.button("SPH").on_hover_text("Set Process Priority to High").clicked() {
                                     // pid is a sysinfo::Pid, so convert it to u32 for Windows API
                                     boost_process(pid.as_u32());
                                 }
-
                                 // Button for Affinity, replace later
                                 if ui.button("UPC").on_hover_text("Use Physical Cores").clicked() {
                                     let dynamic_mask = self.get_physical_core_mask();
                                     set_process_affinity(pid.as_u32(), dynamic_mask);
+                                }
+                                if ui.button("IOP").on_hover_text("Set I/O Priority to High").clicked() {
+                                    set_io_priority(pid_u32, 3);
                                 }
                             });
                         });
@@ -388,7 +446,7 @@ impl eframe::App for OptimizerApp {
 
         if self.is_auto_purge_enabled {
             let mut mem_status = MEMORYSTATUSEX::default();
-            mem_status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            mem_status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
 
             unsafe {
                 let _ = GlobalMemoryStatusEx(&mut mem_status);
@@ -421,7 +479,7 @@ impl eframe::App for OptimizerApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
-                ActiveTab::Processes => self.ui_processes(ui),
+                ActiveTab::Processes => self.ui_processes(ui, ctx),
                 ActiveTab::MemoryCleaner => self.ui_memory_cleaner(ui),
             }
         });
@@ -522,7 +580,7 @@ pub fn purge_standby_list() -> Result<(), String> {
         NtSetSystemInformation(
             80,
             &command as *const _ as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
+            size_of::<i32>() as u32,
         )
     };
 
@@ -593,3 +651,20 @@ pub fn get_standby_list_mb() -> Result<u64, String> {
         Err(format!("NtQuerySystemInformation failed: {:#X}", status))
     }
 }
+
+pub fn set_io_priority(pid: u32, priority: u32) {
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, pid) {
+            // 3 = High I/O priority
+            let mut io_priority: u32 = priority;
+
+            let _ = NtSetInformationProcess (
+                handle,
+                0x21, // ProcessIoPriority constant
+                &mut io_priority as *mut _ as *mut std::ffi::c_void,
+                size_of::<i32>() as u32,
+            );
+        }
+    }
+}
+
