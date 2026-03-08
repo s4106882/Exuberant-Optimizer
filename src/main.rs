@@ -79,6 +79,7 @@ struct OptimizerApp {
     is_auto_purge_enabled: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
+    last_refresh: std::time::Instant,
 }
 
 // Set starting values on first open
@@ -106,6 +107,7 @@ impl Default for OptimizerApp {
             is_auto_purge_enabled: false,
             sort_column: SortColumn::Ram,
             sort_ascending: false,
+            last_refresh: std::time::Instant::now(),
         }
     }
 }
@@ -230,7 +232,7 @@ impl OptimizerApp {
 
                         // CPU Usage
                         // process.cpu_usage() returns an f32 representing percentage
-                        let cpu_usage = process.cpu_usage();
+                        let cpu_usage = process.cpu_usage() / (thread_count as f32);
                         row.col(|ui| { ui.label(format!("{:.1}", cpu_usage)); });
 
                         // Memory Usage
@@ -371,10 +373,18 @@ impl OptimizerApp {
 // What to draw (the ui)
 impl eframe::App for OptimizerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = std::time::Instant::now();
+
         // Tell the system to look for changes
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-        self.system.refresh_cpu_all();
-        self.system.refresh_memory();
+        if now.duration_since(self.last_refresh).as_secs() >= 2 {
+            if matches!(self.active_tab, ActiveTab::Processes) {
+                self.system.refresh_processes(ProcessesToUpdate::All, true);
+                self.system.refresh_cpu_all();
+            } else if matches!(self.active_tab, ActiveTab::MemoryCleaner) {
+                self.system.refresh_memory();
+            }
+            self.last_refresh = now;
+        }
 
         if self.is_auto_purge_enabled {
             let mut mem_status = MEMORYSTATUSEX::default();
@@ -416,8 +426,8 @@ impl eframe::App for OptimizerApp {
             }
         });
 
-        // Tells egui to refresh every second - make it so user can set this later
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        // Increased refresh to 2 seconds - make it so user can set
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
